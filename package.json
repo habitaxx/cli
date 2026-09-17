@@ -1,0 +1,41 @@
+{
+  "name": "@habitaxx/cli",
+  "version": "0.1.0",
+  "description": "栖界开放平台官方命令行工具",
+  "type": "module",
+  "bin": {
+    "habitaxx": "./bin/habitaxx.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "node --check bin/habitaxx.js && node --check src/auth-store.js && node --check src/browser.js && node --check src/cli.js && node --check src/http.js"
+  },
+  "keywords": [
+    "habitaxx",
+    "qijie",
+    "cli",
+    "open-platform",
+    "ai",
+    "device-authorization"
+  ],
+  "author": "Habitaxx",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/habitaxx/cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/habitaxx/cli/issues"
+  },
+  "homepage": "https://github.com/habitaxx/cli#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}
