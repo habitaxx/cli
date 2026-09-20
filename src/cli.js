@@ -20,7 +20,7 @@ import {
   validateBaseUrl,
 } from './http.js'
 
-const VERSION = '0.1.0'
+const VERSION = '1.0.0'
 const DEFAULT_PLATFORM_URL = 'https://platform.habitaxx.com'
 const DEFAULT_API_BASE_URL = 'https://open-api.habitaxx.com/v1'
 const DEFAULT_SCOPES = ['capabilities:read', 'tasks:write']
