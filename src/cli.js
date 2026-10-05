@@ -309,7 +309,7 @@ async function authStatus(args) {
     }
   }
 
-  const safe = publicAuthorization(resolved.authorization)
+  const safe = publicAuthorization(resolved.domain, resolved.authorization)
   if (options.has('--json')) {
     console.log(JSON.stringify({ ...safe, valid }, null, 2))
     return

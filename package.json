@@ -1,10 +1,10 @@
 {
   "name": "@habitaxx/cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "栖界开放平台官方命令行工具",
   "type": "module",
   "bin": {
-    "habitaxx": "./bin/habitaxx.js"
+    "habitaxx": "bin/habitaxx.js"
   },
   "engines": {
     "node": ">=18.17"
