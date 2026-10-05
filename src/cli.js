@@ -20,7 +20,7 @@ import {
   validateBaseUrl,
 } from './http.js'
 
-const VERSION = '1.0.0'
+const VERSION = '1.0.1'
 const DEFAULT_PLATFORM_URL = 'https://platform.habitaxx.com'
 const DEFAULT_API_BASE_URL = 'https://open-api.habitaxx.com/v1'
 const DEFAULT_SCOPES = ['capabilities:read', 'tasks:write']
@@ -157,7 +157,7 @@ async function authInit(args) {
       '--scope',
       '--ability',
     ],
-    booleans: ['--no-open'],
+    booleans: ['--no-open', '--json'],
   })
   if (positionals.length) throw new Error(`无法识别的参数：${positionals.join(' ')}`)
 
@@ -165,102 +165,126 @@ async function authInit(args) {
     stringOption(options, '--platform-url', process.env.HABITAXX_PLATFORM_URL || DEFAULT_PLATFORM_URL),
     '--platform-url',
   )
-  const defaultApiUrl = `${platformUrl}/api/v1`
   const platformApiUrl = normalizeHttpUrl(
-    stringOption(options, '--platform-api-url', process.env.HABITAXX_PLATFORM_API_URL || defaultApiUrl),
+    stringOption(
+      options,
+      '--platform-api-url',
+      process.env.HABITAXX_PLATFORM_API_URL || `${platformUrl}/api/v1`,
+    ),
     '--platform-api-url',
   )
   const apiBaseUrl = normalizeHttpUrl(
     stringOption(options, '--api-base-url', process.env.HABITAXX_API_BASE_URL || DEFAULT_API_BASE_URL),
     '--api-base-url',
   )
-
-  const requestedDomain = domainKey(apiBaseUrl)
-  const existingStore = await loadAuthStore()
-  if (existingStore.domains[requestedDomain]) {
-    const existing = existingStore.domains[requestedDomain]
-    throw new Error(
-      `域 ${requestedDomain} 已存在授权（项目：${existing.project_name || existing.project_no}）。`
-      + `若需重新授权，请先运行 habitaxx auth logout --domain ${requestedDomain}。`,
-    )
+  if ((platformUrl !== DEFAULT_PLATFORM_URL || platformApiUrl !== `${DEFAULT_PLATFORM_URL}/api/v1`) && !options.has('--api-base-url') && !process.env.HABITAXX_API_BASE_URL) {
+    throw new Error('自定义平台地址时必须显式指定 --api-base-url，避免本地凭据误发生产环境')
   }
-
+  await updateAuthStore((store) => {
+    if (store.domains[domainKey(apiBaseUrl)]) {
+      throw new Error('该域已有授权。请先在平台撤销旧 Key 并运行 auth logout --domain <域>，再重新授权')
+    }
+  })
   const clientName = stringOption(options, '--client-name', 'Habitaxx CLI')
-  const deviceName = stringOption(options, '--device-name', os.hostname() || 'developer-device')
-  const scopes = listOption(options, '--scope', DEFAULT_SCOPES)
-  const abilities = listOption(options, '--ability', [])
+  const deviceName = stringOption(options, '--device-name', os.hostname())
+  const requestedCapabilities = listOption(options, '--scope', DEFAULT_SCOPES)
+  const requestedAbilityKeys = listOption(options, '--ability')
 
-  const initResult = await requestJson(`${platformApiUrl}/device-auth/requests`, {
+  const created = await requestJson(`${platformApiUrl}/cli/authorizations`, {
     method: 'POST',
     body: {
       client_name: clientName,
       device_name: deviceName,
-      requested_scopes: scopes,
-      requested_abilities: abilities,
-      api_base_url: apiBaseUrl,
+      requested_capabilities: requestedCapabilities,
+      requested_ability_keys: requestedAbilityKeys,
     },
   })
+  if (!created?.device_code || !created?.user_code) throw new Error('平台未返回有效的设备授权请求')
 
-  const { device_code, user_code, verification_uri_complete, expires_in, interval = 5 } = initResult
-  console.log(`\n请在浏览器中完成设备授权：\n  ${verification_uri_complete}\n`)
-  console.log(`用户代码：${user_code}`)
-  console.log(`有效时间：${Math.floor(expires_in / 60)} 分钟\n`)
+  const authorizationUrl = new URL('/auth', `${platformUrl}/`)
+  authorizationUrl.searchParams.set('code', created.user_code)
 
-  if (!options.has('--no-open')) {
-    try {
-      await openBrowser(verification_uri_complete)
-      console.log('已尝试打开默认浏览器。如未打开，请手动复制上述链接。')
-    } catch {
-      console.log('未能自动打开浏览器，请手动复制上述链接完成授权。')
-    }
-  }
+  console.error(`\n授权码：${created.user_code}\n授权地址：${authorizationUrl.toString()}\n`)
+  if (!options.has('--no-open')) await openBrowser(authorizationUrl.toString())
 
-  console.log('等待授权中（按 Ctrl+C 可取消）...')
-  const pollUrl = `${platformApiUrl}/device-auth/tokens`
-  const pollIntervalMs = Math.max(interval, 2) * 1000
-  const deadline = Date.now() + expires_in * 1000
+  const controller = new AbortController()
+  const interrupt = () => controller.abort(new Error('授权已取消'))
+  process.once('SIGINT', interrupt)
+  process.once('SIGTERM', interrupt)
 
-  while (Date.now() < deadline) {
-    await sleep(pollIntervalMs)
-    try {
-      const pollResult = await requestJson(pollUrl, {
-        method: 'POST',
-        body: { device_code },
-      })
-      if (pollResult && pollResult.api_key) {
-        const stored = {
-          domain: requestedDomain,
-          api_base_url: apiBaseUrl,
-          api_key: pollResult.api_key,
-          api_key_prefix: pollResult.api_key_prefix || `${pollResult.api_key.slice(0, 12)}...`,
-          project_id: pollResult.project_id,
-          project_no: pollResult.project_no,
-          project_name: pollResult.project_name,
-          user_id: pollResult.user_id,
-          capabilities: pollResult.capabilities || scopes,
-          ability_keys: pollResult.ability_keys || abilities,
-          authorized_at: new Date().toISOString(),
-        }
-        await updateAuthStore((store) => {
-          store.domains[requestedDomain] = stored
-          store.current = requestedDomain
+  try {
+    const deadline = Date.now() + Math.max(1, Number(created.expires_in || 600)) * 1000
+    const expiryTimer = setTimeout(() => controller.abort(new Error('授权码已过期')), Math.max(1, Number(created.expires_in || 600)) * 1000)
+    expiryTimer.unref()
+    controller.signal.addEventListener('abort', () => clearTimeout(expiryTimer), { once: true })
+    let interval = Math.max(1, Number(created.interval || 2))
+    while (Date.now() < deadline) {
+      let polled
+      try {
+        polled = await requestJson(`${platformApiUrl}/cli/authorizations/poll`, {
+          method: 'POST',
+          body: { device_code: created.device_code },
+          signal: controller.signal,
         })
-        console.log(`\n授权成功！项目：${stored.project_name}（${stored.project_no}）`)
-        console.log(`凭据已安全保存至：${authFilePath()}`)
-        return
-      }
-    } catch (err) {
-      if (err instanceof HabitaxxHttpError) {
-        if (err.code === 'AUTHORIZATION_PENDING') continue
-        if (err.code === 'SLOW_DOWN') {
-          await sleep(pollIntervalMs)
+      } catch (error) {
+        if (error instanceof HabitaxxHttpError && error.status === 429) {
+          interval = Math.min(10, interval + 1)
+          await sleep(interval * 1000, controller.signal)
           continue
         }
+        throw error
       }
-      throw err
+
+      if (polled?.status === 'approved' && polled.authorization?.api_key) {
+        const domain = domainKey(apiBaseUrl)
+        const store = await updateAuthStore((store) => {
+          if (store.domains[domain]) {
+            throw new Error('该域已由另一终端完成授权，未覆盖原凭据。请在控制台撤销本次新建的 Key')
+          }
+          const userId = `cli:${store.device_id}`
+          store.current = domain
+          store.domains[domain] = {
+            platform_url: platformUrl,
+            platform_api_url: platformApiUrl,
+            api_base_url: apiBaseUrl,
+            project_id: polled.authorization.project_id,
+            project_no: polled.authorization.project_no,
+            project_name: polled.authorization.project_name,
+            user_id: userId,
+            api_key: polled.authorization.api_key,
+            api_key_id: polled.authorization.api_key_id,
+            api_key_name: polled.authorization.api_key_name,
+            api_key_prefix: polled.authorization.api_key_prefix,
+            capabilities: polled.authorization.capabilities || [],
+            ability_keys: polled.authorization.ability_keys || [],
+            authorized_at: polled.authorization.authorized_at,
+          }
+        })
+        const savedPath = authFilePath()
+        const safe = publicAuthorization(domain, store.domains[domain])
+        if (options.has('--json')) {
+          console.log(JSON.stringify({ ...safe, auth_file: savedPath }, null, 2))
+        } else {
+          console.log('授权成功。')
+          console.log(`  域：${domain}`)
+          console.log(`  项目：${safe.project_name} (${safe.project_no})`)
+          console.log(`  API Key：${safe.api_key_prefix}`)
+          console.log(`  已保存：${savedPath}`)
+        }
+        return
+      }
+      if (polled?.status === 'denied') throw new Error('用户拒绝了本次授权')
+      if (polled?.status === 'expired') throw new Error('授权码已过期，请重新运行 habitaxx auth init')
+
+      interval = Math.max(1, Number(polled?.interval || interval))
+      await sleep(interval * 1000, controller.signal)
     }
+    throw new Error('授权码已过期，请重新运行 habitaxx auth init')
+  } finally {
+    controller.abort()
+    process.removeListener('SIGINT', interrupt)
+    process.removeListener('SIGTERM', interrupt)
   }
-  throw new Error('授权超时，请重新执行 habitaxx auth init')
 }
 
 async function authStatus(args) {
